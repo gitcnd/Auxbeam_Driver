@@ -68,6 +68,19 @@
   WIRING
   ====== 
 
+  CAN_Bus
+  -------
+
+           CAN_Bus <=> ARDUINO
+           SO   => PIN12 (MISO)
+           SI   => PIN11 (MOSI)
+           SCK  => PIN13 (SCK)
+           CS   => PIN10 (SS)
+           INT  => PIN2
+
+  AUXBEAM
+  -------
+
   Splice the Arduino pro-mini into the 4 wires as follows:
   
    AUXBEAM    ARDUINO 8mhz
@@ -75,7 +88,7 @@
    =======    ============
      GND   => GND
      3.3v  => VCC
-     TX(2) => D2  (PORTD2; pin 2; *not* the ProMini RX pin!)
+     TX(4) => D4  (PORTD4; pin 4; *not* the ProMini RX pin!)
      RX(3) => D3  (PORTD3; pin 3; *not* the ProMini TX pin!)
 
   Be aware that this code *reads* data from BOTH of the above
@@ -93,7 +106,31 @@
 
 
 #include <SerialID.h>	// See https://github.com/gitcnd/SerialID
-SerialIDset("\n#\tv1.00 3.3v_8mhz_Pro_Mini " __FILE__ "\t" __DATE__ " " __TIME__); // So we know what code and version is running inside our MCUs
+SerialIDset("\n#\tv1.04 3.3v_8mhz_Pro_Mini " __FILE__ "\t" __DATE__ " " __TIME__); // So we know what code and version is running inside our MCUs
+
+
+#include <mcp_can.h>
+#include <SPI.h>
+
+// CAN TX Variables
+unsigned long prevTX = 0;                                        // Variable to store last execution time
+const unsigned int invlTX = 1000;                                // One second interval constant
+byte data[] = {0xAA, 0x55, 0x01, 0x10, 0xFF, 0x12, 0x34, 0x56};  // Generic CAN data to send
+
+// CAN RX Variables
+long unsigned int rxId;
+unsigned char len;
+unsigned char rxBuf[8];
+
+// Serial Output String Buffer
+char msgString[128];
+
+// CAN0 INT and CS
+#define CAN0_INT 2                              // Set INT to pin 2
+MCP_CAN CAN0(10);                               // Set CS to pin 10
+
+
+
 
 // Pin 13 has an LED connected on most Arduino boards.
 // Pin 11 has the LED on Teensy 2.0
@@ -102,10 +139,10 @@ SerialIDset("\n#\tv1.00 3.3v_8mhz_Pro_Mini " __FILE__ "\t" __DATE__ " " __TIME__
 // give it a name:
 int led = LED_BUILTIN;
 
-int bashpin=2;	// Do not change this, or, see "Warning:" below to also change the port bit too
+int bashpin=4;	// Do not change this, or, see "Warning:" below to also change the port bit too
 
 
-#define rxHeadPin 2
+#define rxHeadPin bashpin
 #define rxBasePin 3
 #define txBasePin 3
 
@@ -114,6 +151,7 @@ int bashpin=2;	// Do not change this, or, see "Warning:" below to also change th
 //SoftwareSerial SwSerialH(rxHeadPin, reservedPin);       // RX, TX
 //SoftwareSerial SwSerialB(rxBasePin, reservedPin);     // RX, TX
 //SoftwareSerial SwSerialT(reservedPin, txBasePin);     // RX, TX
+// Darn: cannot use SoftwareSerial because it can only listen on one pn at a time..
 
 
 
@@ -131,11 +169,26 @@ unsigned char buf[pcklen] = { 0b00001101, 0b01010001, 0x55, 0b00111111, 0b111000
 #define baud115200 not tested on 16mhz arduino - you will need an oscilloscope to work out this number - see line "ldi r16, 17" below.
 #endif
 
+// #define USECAN 1
+
 void setup() {                
-  // initialize the digital pin as an output.
-  pinMode(led, OUTPUT);     
   SerialIDshow(115200); // starts Serial.
-  Serial.print("Using delay cycles: ");Serial.println( baud115200);
+
+#ifdef USECAN
+  if(CAN0.begin(MCP_ANY, CAN_250KBPS, MCP_8MHZ) == CAN_OK)
+    Serial.println("MCP2515 Initialized Successfully!");
+  else
+    Serial.println("Error Initializing MCP2515...");
+  
+  // Since we do not set NORMAL mode, we are in loopback mode by default.
+  CAN0.setMode(MCP_NORMAL);
+
+  pinMode(CAN0_INT, INPUT_PULLUP);                           // Configuring pin for /INT input
+#else
+  pinMode(led, OUTPUT);     // initialize the digital pin as an output. (if CAN SCK isnt using it)
+#endif
+
+  //Serial.print("Using delay cycles: ");Serial.println( baud115200);
 
   pinMode(rxHeadPin, INPUT_PULLUP); // so as not to interfere with existing line singals (this goes to OUTPUT only when in use)
   pinMode(rxBasePin, INPUT_PULLUP); // so as not to interfere with existing line singals
@@ -144,19 +197,102 @@ void setup() {
   //SwSerialH.begin(115200); // Damn - cannot do multiplexed inputs... grrr...
 
 }
+uint8_t demoloop[]={ 0b00000000,0b11111111,0b00000000,
 
+
+0b00000001,
+0b00000010,
+0b00000100,
+0b00001000,
+0b00010000,
+0b00100000,
+0b01000000,
+0b10000000,
+
+0b11000000,
+0b11100000,
+0b11110000,
+0b11111000,
+0b11111100,
+0b11111110,
+0b11111111,
+
+0b01111111,
+0b00111111,
+0b00011111,
+0b00001111,
+0b00000111,
+0b00000011,
+0b00000001,
+0b00000000,
+0x55,0xAA,0
+};
+int democtr=0; unsigned char led_tog=0;
 void loop() {
   int ret=0;
-  digitalWrite(led, HIGH);   		// turn the LED on (HIGH is the voltage level)
+  //pinMode(led,OUTPUT);  // cant use LED - SPI CLK is connected here
+  //digitalWrite(led, HIGH);   		// turn the LED on (HIGH is the voltage level)
   delay(500);               		// wait for a second
 
   ret=bitsend(buf, pcklen, baud115200 );		// Do a test sendout
   //if(buf[datbyte]=0x55) buf[datbyte]=0xAA; else buf[datbyte]=0x55;
-  buf[datbyte]++;
- // Serial.println(ret);
+  buf[datbyte]=demoloop[democtr++]; if(buf[datbyte]==0xAA) democtr=0; // demo patterns
+  Serial.println(buf[datbyte]);
   
-  digitalWrite(led, LOW);    		// turn the LED off by making the voltage LOW
+#ifndef USECAN  
+  digitalWrite(led, led_tog++&1);    		// turn the LED off by making the voltage LOW
+#endif
   delay(500);               		// wait for a second
+
+#ifdef USECAN
+
+  for(int ii=0;ii<3;ii++) {
+
+  if(!digitalRead(CAN0_INT))                          // If CAN0_INT pin is low, read receive buffer
+  {
+    CAN0.readMsgBuf(&rxId, &len, rxBuf);              // Read data: len = data length, buf = data byte(s)
+    
+    if((rxId & 0x80000000) == 0x80000000)             // Determine if ID is standard (11 bits) or extended (29 bits)
+      sprintf(msgString, "Extended ID: 0x%.8lX  DLC: %1d  Data:", (rxId & 0x1FFFFFFF), len);
+    else
+      sprintf(msgString, "Standard ID: 0x%.3lX       DLC: %1d  Data:", rxId, len);
+  
+    Serial.print(msgString);
+  
+    if((rxId & 0x40000000) == 0x40000000){            // Determine if message is a remote request frame.
+      sprintf(msgString, " REMOTE REQUEST FRAME");
+      Serial.print(msgString);
+    } else {
+      for(byte i = 0; i<len; i++){
+        sprintf(msgString, " 0x%.2X", rxBuf[i]);
+        Serial.print(msgString);
+      }
+    }
+        
+    Serial.println();
+  }else {
+    //Serial.print("pin "); Serial.print(CAN0_INT); Serial.println(" is high: no data to read");
+  }
+  
+  if(millis() - prevTX >= invlTX){                    // Send this at a one second interval. 
+    CAN0.enOneShotTX(); delay(10);
+    prevTX = millis();
+    byte sndStat = CAN0.sendMsgBuf(0x7f3, 8, data); data[7]++;
+    delay(10);CAN0.disOneShotTX();delay(10);
+    if(sndStat == CAN_OK)
+      Serial.println("Message Sent Successfully!");
+    else
+      Serial.println("Error Sending Message...");
+
+  }
+
+
+
+
+  }// for //delay(3000);
+
+#endif
+
 }
 
 
@@ -167,8 +303,8 @@ int bitsend ( unsigned char *b,int l, int dly) {
   int i=0;				// The counter into our input string
   int j=0; 				// unused, except for loop timing symmetry
   digitalWrite(bashpin,HIGH);		// prepare to take over the line
-  byte p0=PORTD & 0b11111011; 
-  byte p1=  p0 |  0b00000100;		// Warning: bashpin (2) is the bit hard-coded on in this binary number
+  byte p0=PORTD & 0b11101111; 
+  byte p1=  p0 |  0b00010000;		// Warning: bashpin (4) is the bit hard-coded on in this binary number
   
   cli();				// timing critical section starts here: disable interrupts...
   pinMode(bashpin, OUTPUT);		// connect to the line
@@ -252,4 +388,3 @@ Wemos_D1_ESP8266_NodeMCU_1
         -DESP8266
 
  */
-
